@@ -167,6 +167,8 @@
   var player = null, playerReady = false;
   var isPlaying = false, loopOn = true, isPlaylist = false;
   var videoIds = [], currentIndex = 0;
+  var currentPlaylistId = '';
+  var soloMode = false; // playing a playlist video individually to bypass restriction
   var pollTimer = null, scrubTimer = null;
   var isScrubbing = false;
 
@@ -189,8 +191,10 @@
     });
   }
 
+  var cueTimeout = null;
   function onStateChange(e) {
     var S = YT.PlayerState;
+    clearTimeout(cueTimeout);
     if (e.data === S.PLAYING) {
       setPlaying(true);
       try { var d = player.getVideoData(); if (d && d.title) setTitle(d.title); } catch(x){}
@@ -202,15 +206,82 @@
     } else if (e.data === S.ENDED) {
       stopScrubUpdater();
       onEnded();
+    } else if (e.data === S.CUED) {
+      // If a video stays CUED and never plays, it's likely restricted — skip after 3s
+      if (isPlaylist) {
+        cueTimeout = setTimeout(function() {
+          try {
+            if (player.getPlayerState() === S.CUED) {
+              setStatus('Skipping unplayable video ' + (currentIndex + 1) + '...');
+              onError({data: 150});
+            }
+          } catch(x) {}
+        }, 3000);
+      }
     }
   }
 
   function onError(e) {
-    if (isPlaylist && videoIds.length > 1) { setStatus('Skipping restricted video...'); setTimeout(nextTrack, 800); }
-    else { showError('This video cannot be embedded (restricted by uploader).'); setPlaying(false); }
+    if (isPlaylist && videoIds.length > 1) {
+      // Try playing the current video individually (bypasses playlist embed restriction)
+      var vid = videoIds[currentIndex];
+      if (vid && !e._alreadyTriedSolo) {
+        setStatus('Reloading track ' + (currentIndex + 1) + ' individually...');
+        setTimeout(function() {
+          try {
+            player.loadVideoById(vid);
+            // After loading solo, on end we manually advance the playlist
+            soloMode = true;
+          } catch(x) {
+            skipCurrent();
+          }
+        }, 400);
+      } else {
+        skipCurrent();
+      }
+    } else {
+      showError('This video cannot be played here — restricted by uploader.');
+      setPlaying(false);
+    }
+  }
+
+  function skipCurrent() {
+    setStatus('Skipping restricted video ' + (currentIndex + 1) + '...');
+    setTimeout(function() {
+      soloMode = false;
+      if (currentIndex < videoIds.length - 1) {
+        currentIndex++;
+        player.loadPlaylist({ listType: 'playlist', list: currentPlaylistId, index: currentIndex });
+        setTimeout(function() { try { player.playVideo(); } catch(x){} }, 800);
+      } else if (loopOn) {
+        currentIndex = 0;
+        player.loadPlaylist({ listType: 'playlist', list: currentPlaylistId, index: 0 });
+        setTimeout(function() { try { player.playVideo(); } catch(x){} }, 800);
+      } else {
+        setPlaying(false);
+        setStatus('No more playable tracks.');
+      }
+    }, 500);
   }
 
   function onEnded() {
+    if (isPlaylist && soloMode) {
+      // Solo video finished — resume playlist at next track
+      soloMode = false;
+      if (currentIndex < videoIds.length - 1) {
+        currentIndex++;
+        player.loadPlaylist({ listType: 'playlist', list: currentPlaylistId, index: currentIndex });
+        setTimeout(function() { try { player.playVideo(); } catch(x){} }, 600);
+      } else if (loopOn) {
+        currentIndex = 0;
+        player.loadPlaylist({ listType: 'playlist', list: currentPlaylistId, index: 0 });
+        setTimeout(function() { try { player.playVideo(); } catch(x){} }, 600);
+      } else {
+        setPlaying(false); setStatus('Playlist ended.');
+      }
+      highlightItem(currentIndex);
+      return;
+    }
     if (isPlaylist) {
       if (currentIndex < videoIds.length - 1) { currentIndex++; player.playVideoAt(currentIndex); }
       else if (loopOn) { currentIndex = 0; player.playVideoAt(0); }
@@ -319,6 +390,7 @@
 
     if (p.listId) {
       isPlaylist = true;
+      currentPlaylistId = p.listId;
       document.getElementById('track-type').textContent = 'PLAYLIST';
       player.loadPlaylist({ listType: 'playlist', list: p.listId, index: 0 });
       pollForPlaylist();
